@@ -3,7 +3,6 @@ import torch
 from torch import nn
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import StepLR
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from collections import OrderedDict
 from utils import TEXT
 
@@ -89,26 +88,28 @@ class Classifier(nn.Module):
 
 
 
-class TotalNN(pl.LightningModule):
-    def __init__(self, encoder_type:str):
-        super(TotalNN, self).__init__()
+class Enc_MLP(pl.LightningModule):
+    def __init__(self, args):
+        super(Enc_MLP, self).__init__()
         
         self.save_hyperparameters()
+        self.args = args
 
-        if encoder_type == "awe":
+        if args.encoder_type == "awe":
             self.encoder = AWE_Encoder(TEXT.vocab.vectors)
-            self.net = Classifier(encoder_type, None)
-        elif encoder_type == "uni_lstm":
+            self.net = Classifier(args.encoder_type, None)
+        elif args.encoder_type == "uni_lstm":
             self.encoder = Unidirectional_LSTM(TEXT.vocab.vectors,2048)
-            self.net = Classifier(encoder_type, SENTENCE_DIM)
-        elif encoder_type == "bi_lstm":
+            self.net = Classifier(args.encoder_type, 1024)
+        elif args.encoder_type == "bi_lstm":
             self.encoder = Bidirectional_LSTM(TEXT.vocab.vectors,2048)
-            self.net = Classifier(encoder_type, SENTENCE_DIM)
-        elif encoder_type == "pooled_bi_lstm":
+            self.net = Classifier(args.encoder_type, 1024)
+        elif args.encoder_type == "pooled_bi_lstm":
             self.encoder == MaxPool_Bidirectional_LSTM(TEXT.vocab.vectors,2048)
-            self.net = Classifier(encoder_type, SENTENCE_DIM)
+            self.net = Classifier(args.encoder_type, 1024)
 
         self.criterion = nn.CrossEntropyLoss() # as long as the loss module is cross entropy, we don't need to add softmax 
+        self.valid_accuracy = []
 
 
     def forward(self, premise:torch.tensor, hypothesis:torch.tensor) -> torch.tensor:
@@ -119,11 +120,8 @@ class TotalNN(pl.LightningModule):
         return pred
     
     def configure_optimizers(self):
-        # Create Optimizer
-        #optimizer = torch.optim.Adam(self.parameters(), lr=0.02)
-
         optimizer = torch.optim.Adam([{'params': self.encoder.parameters()},
-                {'params': self.net.parameters()}], lr=0.02)
+                {'params': self.net.parameters()}], lr = self.args.lr)
         
         scheduler = {
             'scheduler': StepLR(optimizer=optimizer, step_size=1, gamma=0.99),
@@ -140,8 +138,8 @@ class TotalNN(pl.LightningModule):
         acc = (output.argmax(dim=-1) == label).float().mean()
         self.log("train_acc", loss)
         self.log("train_loss", acc)
-        train_tensorboard_logs = {"train_loss": loss, "train_acc": acc}
-        return train_tensorboard_logs
+        #train_tensorboard_logs = {"train_loss": loss, "train_acc": acc}
+        return loss,acc
     
     def validation_step(self, batch, batch_idx):
         premise = batch.premise
@@ -150,10 +148,11 @@ class TotalNN(pl.LightningModule):
         output = self.forward(premise,hypothesis)
         loss = self.criterion(output,label)
         acc = (output.argmax(dim=-1) == label).float().mean()
-        self.log("valid_acc", loss)
-        self.log("valid_loss", acc)
-        valid_tensorboard_logs = {"valid_loss": loss, "valid_acc": acc}
-        return valid_tensorboard_logs
+        self.valid_accuracy.append(acc)
+        self.log("val_acc", loss)
+        self.log("val_loss", acc)
+        #valid_tensorboard_logs = {"valid_loss": loss, "valid_acc": acc}
+        return acc
 
     def test_step(self, batch, batch_idx):
         premise = batch.premise
@@ -164,8 +163,22 @@ class TotalNN(pl.LightningModule):
         acc = (output.argmax(dim=-1) == label).float().mean()
         self.log("test_acc", loss)
         self.log("test_loss", acc)
-        test_tensorboard_logs = {"test_loss": loss, "test_acc": acc}
-        return test_tensorboard_logs
+        #test_tensorboard_logs = {"test_loss": loss, "test_acc": acc}
+        return acc
+    
+    def validation_epoch_end(self):
+
+        #self.last_val_acc = self.current_acc
+        #self.current_acc = sum(acc) / len(acc)
+
+        if self.valid_accuracy[-1] < self.valid_accuracy[-2]:
+            for pg in self.trainer.optimizers[0].param_groups:
+                pg['lr'] *= 0.2
+
+    def train_epoch_end(self):
+        current_lr = self.trainer.optimizers[0].state_dict()['param_groups'][0]['lr']
+        if (current_lr < 10e-5):
+            self.trainer.should_stop = True
 
 
 
