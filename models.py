@@ -1,4 +1,3 @@
-import numpy as np
 import torch 
 from torch import nn
 import pytorch_lightning as pl
@@ -10,54 +9,58 @@ from utils import TEXT
 class AWE_Encoder(nn.Module):
     def __init__(self, embeddings:torch.tensor):
         super(AWE_Encoder, self).__init__()
-        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True)
+        
+        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
     
     def forward(self, input:torch.tensor) -> torch.tensor :
         embeds = self.embedding_layer(input)
-        output = torch.mean(embeds)
+        output = torch.mean(embeds, dim=1)
         return output
     
 
 class Unidirectional_LSTM(nn.Module):
-    def __init__(self, embeddings:torch.tensor, hidden_dim:int):
+    def __init__(self, embeddings:torch.tensor):
         super(Unidirectional_LSTM, self).__init__()
-        
-        self.hidden_dim = hidden_dim
-        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True)
-        self.LSTM = nn.LSTM(300, hidden_dim, 1, bidirectional=False)
+
+        self.sentence_dim = 2048
+        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
+        self.LSTM = nn.LSTM(input_size=300,hidden_size=self.sentence_dim, num_layers=1, batch_first=True, bidirectional=False)
     
     def forward(self, input:torch.tensor) -> torch.tensor :
         embeds = self.embedding_layer(input)
         output, (hidden_states, cell_states) = self.LSTM(embeds)
+        hidden_states = torch.reshape(hidden_states, (-1,self.sentence_dim))
         return hidden_states
 
 
 class Bidirectional_LSTM(nn.Module):
-    def __init__(self, embeddings:torch.tensor, hidden_dim:int):
+    def __init__(self, embeddings:torch.tensor):
         super(Bidirectional_LSTM, self).__init__()
-        
-        self.hidden_dim = hidden_dim
-        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True)
-        self.LSTM = nn.LSTM(300, hidden_dim, 1, bidirectional=True)
+
+        self.sentence_dim = 2048
+        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
+        self.LSTM = nn.LSTM(input_size=300,hidden_size=self.sentence_dim, num_layers=1, batch_first=True, bidirectional=True)
     
     def forward(self, input:torch.tensor) -> torch.tensor :
         embeds = self.embedding_layer(input)
         output, (hidden_states, cell_states) = self.LSTM(embeds)
-        return hidden_states
+        hidden_states = torch.reshape(hidden_states, (2,-1,self.sentence_dim))
+        hiddenstates = torch.cat([hidden_states[0], hidden_states[1]],1)
+        return hiddenstates
     
 
 class MaxPool_Bidirectional_LSTM(nn.Module):
-    def __init__(self, embeddings:torch.tensor, hidden_dim:int):
+    def __init__(self, embeddings:torch.tensor):
         super(MaxPool_Bidirectional_LSTM, self).__init__()
-        
-        self.hidden_dim = hidden_dim
-        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True)
-        self.LSTM = nn.LSTM(300, hidden_dim, 1, bidirectional=True)
+
+        self.sentence_dim = 4096
+        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
+        self.LSTM = nn.LSTM(input_size=300,hidden_size=self.sentence_dim, num_layers=1, batch_first=True, bidirectional=True)
     
     def forward(self, input:torch.tensor) -> torch.tensor :
         embeds = self.embedding_layer(input)
         output, (hidden_states, cell_states) = self.LSTM(embeds)
-        out_hidden_states = hidden_states.max(1)#.values
+        out_hidden_states = torch.max(hidden_states,dim=1).values #hidden_states.max(1).values
         return out_hidden_states
        
 
@@ -82,9 +85,10 @@ class Classifier(nn.Module):
                 ("out", nn.Linear(512,3))
             ]))
 
-    def forward(self, input:torch.tensor)-> torch.tensor:
-        out = self.net(input)
+    def forward(self, encoded_embeds:torch.tensor)-> torch.tensor:
+        out = self.net(encoded_embeds)
         return out
+
 
 
 
@@ -97,30 +101,29 @@ class Enc_MLP(pl.LightningModule):
 
         if args.encoder_type == "awe":
             self.encoder = AWE_Encoder(TEXT.vocab.vectors)
-            self.net = Classifier(args.encoder_type, None)
+            self.net = Classifier("awe", 0)
         elif args.encoder_type == "uni_lstm":
-            self.encoder = Unidirectional_LSTM(TEXT.vocab.vectors,2048)
-            self.net = Classifier(args.encoder_type, 1024)
+            self.encoder = Unidirectional_LSTM(TEXT.vocab.vectors)
+            self.net = Classifier("uni_lstm", self.encoder.sentence_dim)
         elif args.encoder_type == "bi_lstm":
-            self.encoder = Bidirectional_LSTM(TEXT.vocab.vectors,2048)
-            self.net = Classifier(args.encoder_type, 1024)
+            self.encoder = Bidirectional_LSTM(TEXT.vocab.vectors)
+            self.net = Classifier("bi_lstm", self.encoder.sentence_dim)
         elif args.encoder_type == "pooled_bi_lstm":
-            self.encoder == MaxPool_Bidirectional_LSTM(TEXT.vocab.vectors,2048)
-            self.net = Classifier(args.encoder_type, 1024)
+            self.encoder == MaxPool_Bidirectional_LSTM(TEXT.vocab.vectors)
+            self.net = Classifier("pooled_bi_lstm", self.encoder.sentence_dim)
 
         self.criterion = nn.CrossEntropyLoss() # as long as the loss module is cross entropy, we don't need to add softmax 
         self.valid_accuracy = []
 
-
     def forward(self, premise:torch.tensor, hypothesis:torch.tensor) -> torch.tensor:
         u = self.encoder(premise)
         v = self.encoder(hypothesis)
-        classifier_input = torch.cat([premise, hypothesis, torch.abs(u-v), u*v], 1)
+        classifier_input = torch.cat([u, v, torch.abs(u-v), u*v], 1)
         pred = self.net(classifier_input)
         return pred
     
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam([{'params': self.encoder.parameters()},
+        optimizer = torch.optim.SGD([{'params': self.encoder.parameters()},
                 {'params': self.net.parameters()}], lr = self.args.lr)
         
         scheduler = {
@@ -129,6 +132,7 @@ class Enc_MLP(pl.LightningModule):
         }
         return [optimizer], [scheduler]
 
+
     def training_step(self, batch, batch_idx):
         premise = batch.premise
         hypothesis = batch.hypothesis
@@ -136,11 +140,18 @@ class Enc_MLP(pl.LightningModule):
         output = self.forward(premise,hypothesis)
         loss = self.criterion(output,label)
         acc = (output.argmax(dim=-1) == label).float().mean()
-        self.log("train_acc", loss)
-        self.log("train_loss", acc)
-        #train_tensorboard_logs = {"train_loss": loss, "train_acc": acc}
-        return loss,acc
+        self.log("train_acc", acc)
+        self.log("train_loss", loss)
+        train_tensorboard_logs = {"loss": loss, "acc": acc}
+        return train_tensorboard_logs
     
+    def on_train_epoch_end(self):
+        for pg in self.trainer.optimizers[0].param_groups:
+            current_lr = pg['lr']
+            if current_lr < 10e-5: 
+                self.trainer.should_stop = True #return -1
+
+
     def validation_step(self, batch, batch_idx):
         premise = batch.premise
         hypothesis = batch.hypothesis
@@ -149,10 +160,18 @@ class Enc_MLP(pl.LightningModule):
         loss = self.criterion(output,label)
         acc = (output.argmax(dim=-1) == label).float().mean()
         self.valid_accuracy.append(acc)
-        self.log("val_acc", loss)
-        self.log("val_loss", acc)
+        self.log("val_acc", acc)
+        self.log("val_loss", loss)
         #valid_tensorboard_logs = {"valid_loss": loss, "valid_acc": acc}
         return acc
+    
+    def on_validation_epoch_end(self):
+        #self.last_val_acc = self.current_acc
+        #self.current_acc = sum(acc) / len(acc)
+        if self.valid_accuracy[-1] < self.valid_accuracy[-2]:
+            for pg in self.trainer.optimizers[0].param_groups:
+                pg['lr'] *= 0.2
+
 
     def test_step(self, batch, batch_idx):
         premise = batch.premise
@@ -161,26 +180,8 @@ class Enc_MLP(pl.LightningModule):
         output = self.forward(premise,hypothesis)
         loss = self.criterion(output,label)
         acc = (output.argmax(dim=-1) == label).float().mean()
-        self.log("test_acc", loss)
-        self.log("test_loss", acc)
+        self.log("test_acc", acc)
+        self.log("test_loss", loss)
         #test_tensorboard_logs = {"test_loss": loss, "test_acc": acc}
         return acc
     
-    def validation_epoch_end(self):
-
-        #self.last_val_acc = self.current_acc
-        #self.current_acc = sum(acc) / len(acc)
-
-        if self.valid_accuracy[-1] < self.valid_accuracy[-2]:
-            for pg in self.trainer.optimizers[0].param_groups:
-                pg['lr'] *= 0.2
-
-    def train_epoch_end(self):
-        current_lr = self.trainer.optimizers[0].state_dict()['param_groups'][0]['lr']
-        if (current_lr < 10e-5):
-            self.trainer.should_stop = True
-
-
-
-
-        
