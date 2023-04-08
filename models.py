@@ -37,16 +37,15 @@ class Bidirectional_LSTM(nn.Module):
     def __init__(self, embeddings:torch.tensor):
         super(Bidirectional_LSTM, self).__init__()
 
-        self.sentence_dim = 2048
+        self.sentence_dim = 4096
         self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
-        self.LSTM = nn.LSTM(input_size=300,hidden_size=self.sentence_dim, num_layers=1, batch_first=True, bidirectional=True)
+        self.LSTM = nn.LSTM(input_size=300,hidden_size=2048, num_layers=1, batch_first=True, bidirectional=True)
     
     def forward(self, input:torch.tensor) -> torch.tensor :
         embeds = self.embedding_layer(input)
-        output, (hidden_states, cell_states) = self.LSTM(embeds)
-        hidden_states = torch.reshape(hidden_states, (2,-1,self.sentence_dim))
-        hiddenstates = torch.cat([hidden_states[0], hidden_states[1]],1)
-        return hiddenstates
+        output, (hidden_states, cell_states) = self.LSTM(embeds) 
+        hfor_hrev = torch.cat([hidden_states[0], hidden_states[1]],1) # We concatenate the Hforward and Hreverse
+        return hfor_hrev
     
 
 class MaxPool_Bidirectional_LSTM(nn.Module):
@@ -55,12 +54,12 @@ class MaxPool_Bidirectional_LSTM(nn.Module):
 
         self.sentence_dim = 4096
         self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
-        self.LSTM = nn.LSTM(input_size=300,hidden_size=self.sentence_dim, num_layers=1, batch_first=True, bidirectional=True)
+        self.LSTM = nn.LSTM(input_size=300,hidden_size=2048, num_layers=1, batch_first=True, bidirectional=True)
     
     def forward(self, input:torch.tensor) -> torch.tensor :
         embeds = self.embedding_layer(input)
-        output, (hidden_states, cell_states) = self.LSTM(embeds)
-        out_hidden_states = torch.max(hidden_states,dim=1).values #hidden_states.max(1).values
+        hidden_states, _ = self.LSTM(embeds) # When bidirectional, output will contain a concatenation of the forward and reverse hidden states at each time step in the sequence.
+        out_hidden_states = torch.max(hidden_states,dim=1).values
         return out_hidden_states
        
 
@@ -109,7 +108,7 @@ class Enc_MLP(pl.LightningModule):
             self.encoder = Bidirectional_LSTM(TEXT.vocab.vectors)
             self.net = Classifier("bi_lstm", self.encoder.sentence_dim)
         elif args.encoder_type == "pooled_bi_lstm":
-            self.encoder == MaxPool_Bidirectional_LSTM(TEXT.vocab.vectors)
+            self.encoder = MaxPool_Bidirectional_LSTM(TEXT.vocab.vectors)
             self.net = Classifier("pooled_bi_lstm", self.encoder.sentence_dim)
 
         self.criterion = nn.CrossEntropyLoss() # as long as the loss module is cross entropy, we don't need to add softmax 
