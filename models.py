@@ -1,66 +1,87 @@
 import torch 
 from torch import nn
-import pytorch_lightning as pl
-from torch.optim.lr_scheduler import StepLR
 from collections import OrderedDict
-from utils import TEXT
 
 
 class AWE_Encoder(nn.Module):
-    def __init__(self, embeddings:torch.tensor):
-        super(AWE_Encoder, self).__init__()
-        
-        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
-    
-    def forward(self, input:torch.tensor) -> torch.tensor :
-        embeds = self.embedding_layer(input)
-        output = torch.mean(embeds, dim=1)
+    def __init__(self):
+        super(AWE_Encoder, self).__init__() 
+        # The init function is empty as the average of the embeddings is done in the forward function
+            
+    def forward(self, embeddings:torch.tensor, sentence_length:torch.tensor) -> torch.tensor :
+        # Computes the AWE
+        output = torch.sum(embeddings, dim=1) / torch.unsqueeze(sentence_length,dim=1).float()
         return output
     
 
 class Unidirectional_LSTM(nn.Module):
-    def __init__(self, embeddings:torch.tensor):
+    def __init__(self):
         super(Unidirectional_LSTM, self).__init__()
-
-        self.sentence_dim = 2048
-        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
-        self.LSTM = nn.LSTM(input_size=300,hidden_size=self.sentence_dim, num_layers=1, batch_first=True, bidirectional=False)
+        # Single layer LSTM with input size = 300 and hidden size = 2048
+        # batch_first = True, as it depends on how you load the data from the dataloader
+        self.lstm = nn.LSTM(input_size=300, hidden_size=2048 , num_layers=1, batch_first=True, bidirectional=False)
     
-    def forward(self, input:torch.tensor) -> torch.tensor :
-        embeds = self.embedding_layer(input)
-        output, (hidden_states, cell_states) = self.LSTM(embeds)
-        hidden_states = torch.reshape(hidden_states, (-1,self.sentence_dim))
-        return hidden_states
+    def forward(self, embeddings:torch.tensor, sentence_length:torch.tensor) -> torch.tensor :
+
+        # Sort the lengths by descending order
+        sorted_lengths, sorted_indices = torch.sort(sentence_length, descending = True)
+        # Choose the embeddings based on the sort done above
+        sorted_embeddings = torch.index_select(embeddings, dim=0, index=sorted_indices)
+        # Pack the padded sequence, sorted_lengths has to be on CPU, as it causes conflicts if on gpu
+        packed_embeddings = nn.utils.rnn.pack_padded_sequence(sorted_embeddings, sorted_lengths.to('cpu'), batch_first = True)
+        # nn.LSTM returns: (ALL, (h0, c0)), where ALL = the hidden states and (h0, c0) = hidden state and cell state of the last time-step
+        hidden_states = self.lstm(packed_embeddings)[1][0].squeeze(0) # Initial (h_0, c_0) are zeros if not provided.
+        # No need to unpack, because we keep the hidden states 
+        # Basically the opposite of what we did before
+        _, unsorted_indices = torch.sort(sorted_indices)
+        output = torch.index_select(hidden_states, dim=0, index=unsorted_indices)
+        return output
 
 
 class Bidirectional_LSTM(nn.Module):
-    def __init__(self, embeddings:torch.tensor):
+    def __init__(self):
         super(Bidirectional_LSTM, self).__init__()
-
-        self.sentence_dim = 4096
-        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
-        self.LSTM = nn.LSTM(input_size=300,hidden_size=2048, num_layers=1, batch_first=True, bidirectional=True)
+        # Bidirectional = True to take the forward and the reverse state
+        self.lstm = nn.LSTM(input_size=300, hidden_size=2048, num_layers=1, batch_first=True, bidirectional=True)
     
-    def forward(self, input:torch.tensor) -> torch.tensor :
-        embeds = self.embedding_layer(input)
-        output, (hidden_states, cell_states) = self.LSTM(embeds) 
-        hfor_hrev = torch.cat([hidden_states[0], hidden_states[1]],1) # We concatenate the Hforward and Hreverse
-        return hfor_hrev
+    def forward(self, embeddings:torch.tensor, sentence_length:torch.tensor) -> torch.tensor :
+
+        sorted_lengths, sorted_indices = torch.sort(sentence_length, descending =True)
+        sorted_embeddings = torch.index_select(embeddings, dim=0, index=sorted_indices)
+        packed_embeddings = nn.utils.rnn.pack_padded_sequence(sorted_embeddings, sorted_lengths.to('cpu'), batch_first = True)
+        # We are interested in the hidden states
+        _, (hidden_states, _) = self.lstm(packed_embeddings)
+        # We concatenate the forward and the reverse state H_out = [H_forward H_reverse]
+        final_states = torch.hstack((hidden_states[0],hidden_states[1]))
+        _, unsorted_indices = torch.sort(sorted_indices)
+        output = torch.index_select(final_states, dim=0, index=unsorted_indices)
+    
+        return output
     
 
 class MaxPool_Bidirectional_LSTM(nn.Module):
-    def __init__(self, embeddings:torch.tensor):
+    def __init__(self):
         super(MaxPool_Bidirectional_LSTM, self).__init__()
 
-        self.sentence_dim = 4096
-        self.embedding_layer = nn.Embedding.from_pretrained(embeddings, freeze=True, padding_idx=1)
-        self.LSTM = nn.LSTM(input_size=300,hidden_size=2048, num_layers=1, batch_first=True, bidirectional=True)
+        self.lstm = nn.LSTM(input_size=300, hidden_size=2048, num_layers=1, batch_first=True, bidirectional=True)
     
-    def forward(self, input:torch.tensor) -> torch.tensor :
-        embeds = self.embedding_layer(input)
-        hidden_states, _ = self.LSTM(embeds) # When bidirectional, output will contain a concatenation of the forward and reverse hidden states at each time step in the sequence.
-        out_hidden_states = torch.max(hidden_states,dim=1).values
-        return out_hidden_states
+    def forward(self, embeddings:torch.tensor, sentence_length:torch.tensor) -> torch.tensor :
+
+        sorted_lengths, sorted_indices = torch.sort(sentence_length, descending =True)
+        sorted_embeddings = torch.index_select(embeddings, dim=0, index=sorted_indices)
+        packed_embeddings = nn.utils.rnn.pack_padded_sequence(sorted_embeddings, sorted_lengths.to('cpu'), batch_first = True)
+        all_states, _ = self.lstm(packed_embeddings)
+        # We pad the packed sequence, but instead of zeros, we pad with -10 so it won't cause any problems during max pooling
+        hidden_states = nn.utils.rnn.pad_packed_sequence(all_states, batch_first = True,padding_value=-10)[0]
+        _, unsorted_indices = torch.sort(sorted_indices)
+        out = torch.index_select(hidden_states, dim=0, index=unsorted_indices)
+        # Max pooling
+        sorted_lengths = sorted_lengths.int()
+        emb_out = [out[i][:sorted_lengths[i]] for i in range(len(out))]
+        emb_max = [emb_out[i].max(dim=0)[0] for i in range(len(emb_out))]
+        output = torch.vstack(emb_max)
+
+        return output
        
 
 class Classifier(nn.Module):
@@ -84,103 +105,38 @@ class Classifier(nn.Module):
                 ("out", nn.Linear(512,3))
             ]))
 
-    def forward(self, encoded_embeds:torch.tensor)-> torch.tensor:
+    def forward(self, encoded_embeds:torch.tensor) -> torch.tensor:
         out = self.net(encoded_embeds)
         return out
 
 
-
-
-class Enc_MLP(pl.LightningModule):
-    def __init__(self, args):
+class Enc_MLP(nn.Module):
+    def __init__(self, weight, args):
         super(Enc_MLP, self).__init__()
         
-        self.save_hyperparameters()
         self.args = args
+        # Embedding layer so the sentences are converted into embeddings
+        # We set freeze = True, because we use the pretrained GloVE embeddings
+        self.embedding_layer = nn.Embedding.from_pretrained(weight, freeze=True, padding_idx=1)
 
         if args.encoder_type == "awe":
-            self.encoder = AWE_Encoder(TEXT.vocab.vectors)
+            self.encoder = AWE_Encoder()
             self.net = Classifier("awe", 0)
         elif args.encoder_type == "uni_lstm":
-            self.encoder = Unidirectional_LSTM(TEXT.vocab.vectors)
-            self.net = Classifier("uni_lstm", self.encoder.sentence_dim)
+            self.encoder = Unidirectional_LSTM()
+            self.net = Classifier("uni_lstm", 2048)
         elif args.encoder_type == "bi_lstm":
-            self.encoder = Bidirectional_LSTM(TEXT.vocab.vectors)
-            self.net = Classifier("bi_lstm", self.encoder.sentence_dim)
+            self.encoder = Bidirectional_LSTM()
+            self.net = Classifier("bi_lstm", 2 * 2048) #4096 because we have bidirectional
         elif args.encoder_type == "pooled_bi_lstm":
-            self.encoder = MaxPool_Bidirectional_LSTM(TEXT.vocab.vectors)
-            self.net = Classifier("pooled_bi_lstm", self.encoder.sentence_dim)
+            self.encoder = MaxPool_Bidirectional_LSTM()
+            self.net = Classifier("pooled_bi_lstm", 2 * 2048) #same as above
 
-        self.criterion = nn.CrossEntropyLoss() # as long as the loss module is cross entropy, we don't need to add softmax 
-        self.valid_accuracy = []
-
-    def forward(self, premise:torch.tensor, hypothesis:torch.tensor) -> torch.tensor:
-        u = self.encoder(premise)
-        v = self.encoder(hypothesis)
+    def forward(self, premise:torch.tensor, premise_length:torch.tensor, hypothesis:torch.tensor, hypothesis_length:torch.tensor) -> torch.tensor:
+        premise = self.embedding_layer(premise)
+        hypothesis = self.embedding_layer(hypothesis)    
+        u = self.encoder(premise, premise_length)
+        v = self.encoder(hypothesis, hypothesis_length)
         classifier_input = torch.cat([u, v, torch.abs(u-v), u*v], 1)
-        pred = self.net(classifier_input)
-        return pred
-    
-    def configure_optimizers(self):
-        optimizer = torch.optim.SGD([{'params': self.encoder.parameters()},
-                {'params': self.net.parameters()}], lr = self.args.lr)
-        
-        scheduler = {
-            'scheduler': StepLR(optimizer=optimizer, step_size=1, gamma=0.99),
-            'name': 'lr'
-        }
-        return [optimizer], [scheduler]
-
-
-    def training_step(self, batch, batch_idx):
-        premise = batch.premise
-        hypothesis = batch.hypothesis
-        label = batch.label
-        output = self.forward(premise,hypothesis)
-        loss = self.criterion(output,label)
-        acc = (output.argmax(dim=-1) == label).float().mean()
-        self.log("train_acc", acc)
-        self.log("train_loss", loss)
-        train_tensorboard_logs = {"loss": loss, "acc": acc}
-        return train_tensorboard_logs
-    
-    def on_train_epoch_end(self):
-        for pg in self.trainer.optimizers[0].param_groups:
-            current_lr = pg['lr']
-            if current_lr < 10e-5: 
-                self.trainer.should_stop = True #return -1
-
-
-    def validation_step(self, batch, batch_idx):
-        premise = batch.premise
-        hypothesis = batch.hypothesis
-        label = batch.label
-        output = self.forward(premise,hypothesis)
-        loss = self.criterion(output,label)
-        acc = (output.argmax(dim=-1) == label).float().mean()
-        self.valid_accuracy.append(acc)
-        self.log("val_acc", acc)
-        self.log("val_loss", loss)
-        #valid_tensorboard_logs = {"valid_loss": loss, "valid_acc": acc}
-        return acc
-    
-    def on_validation_epoch_end(self):
-        #self.last_val_acc = self.current_acc
-        #self.current_acc = sum(acc) / len(acc)
-        if self.valid_accuracy[-1] < self.valid_accuracy[-2]:
-            for pg in self.trainer.optimizers[0].param_groups:
-                pg['lr'] *= 0.2
-
-
-    def test_step(self, batch, batch_idx):
-        premise = batch.premise
-        hypothesis = batch.hypothesis
-        label = batch.label
-        output = self.forward(premise,hypothesis)
-        loss = self.criterion(output,label)
-        acc = (output.argmax(dim=-1) == label).float().mean()
-        self.log("test_acc", acc)
-        self.log("test_loss", loss)
-        #test_tensorboard_logs = {"test_loss": loss, "test_acc": acc}
-        return acc
-    
+        output = self.net(classifier_input)
+        return output
