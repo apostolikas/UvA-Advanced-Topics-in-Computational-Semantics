@@ -10,7 +10,9 @@ This repository is a reimplementation of the paper "Supervised Learning of Unive
 
 `git clone https://github.com/apostolikas/UvA-Advanced-Topics-in-Computational-Semantics.git`
 
-2) Create the environment:
+2) A very important step is that you have to manually put the glove.840B.300d.txt file in the main folder created by the command above.
+
+3) Create the environment:
 
 `conda env create -f env.yml`
 
@@ -18,22 +20,22 @@ In case you are trying to run this code on Lisa, create the environment using th
 
 `conda env create -f environment_lisa.yml`
 
-3) Activate the environment:
+4) Activate the environment:
 
 `conda activate atcs`
 
-4) For SentEval there's no need to clone the repository as long as I provide the necessary scripts, but you have to download the data. In order to do this, run (in SentEval/data/downstream/):
+5) For SentEval there's no need to clone the repository as long as I provide the necessary scripts, but you have to download the data. In order to do this, run (in SentEval/data/downstream/):
 
 `./get_transfer_data.bash`
 
 This is going to take a few minutes but once it's done, it's all set.
 
-5) Run the scripts with the following order:
+6) Run the scripts with the following order:
 - utils.py (Prerequisities for the SNLI Dataset)
 - train.py (Train and evaluation on SNLI)
 - eval.py (Evaluation on SentEval)
 
-6) You can view the results train,validation,test) and some error analysis for the different encoder types by accessing the Jupyter Notebook:
+7) You can view the results train,validation,test) and some error analysis for the different encoder types by accessing the Jupyter Notebook:
 
 `jupyter notebook analysis.ipynb`
 
